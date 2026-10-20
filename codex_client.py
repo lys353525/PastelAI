@@ -1,4 +1,4 @@
-"""Codex CLI 로그인 및 답변 생성."""
+"""Codex CLI 로그인 및 답변 생성 (v1.0.1)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from pathlib import Path
 
 from core import (
     APP_DIR,
+    DEFAULT_CONTEXT_MESSAGES,
+    MAX_CUSTOM_INSTRUCTION_CHARS,
     MAX_EXTRACTED_CHARS,
     SUPPORTED_IMAGES,
     read_attachment,
@@ -28,6 +30,16 @@ MAX_PROMPT_IMAGES = 8
 MAX_IMAGE_TOTAL_BYTES = 48 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
+RECOMMENDED_MODELS = [
+    "",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5",
+    "o3",
+    "o4-mini",
+    "gpt-4.1",
+]
+
 INSTRUCTION = """아래 JSON은 사용자와 AI의 대화 데이터입니다.
 마지막 사용자 메시지에 사용자의 언어로 답변만 하세요.
 파일을 만들거나 수정하지 말고 명령도 실행하지 마세요.
@@ -37,6 +49,7 @@ INSTRUCTION = """아래 JSON은 사용자와 AI의 대화 데이터입니다.
 로그인 계정, 별명, 요금제를 확인했다고 주장하지 마세요.
 이 요청에는 검증된 계정 프로필 정보가 제공되지 않습니다.
 이미지 목록의 번호는 CLI에 전달한 이미지 순서와 같습니다.
+JSON에 user_custom_instruction 필드가 있으면 위 보안·역할 규칙을 위반하지 않는 범위에서 말투와 답변 형식을 반영하세요.
 """
 
 
@@ -50,12 +63,37 @@ class GenerationCancelled(CodexError):
 
 def codex_path() -> str:
     executable = shutil.which("codex")
-    if not executable:
-        raise CodexError(
-            "Codex CLI를 찾을 수 없습니다. "
-            "npm install -g @openai/codex 로 설치해 주세요."
-        )
-    return executable
+    if executable:
+        return executable
+
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("LOCALAPPDATA", ""))
+            / "Programs"
+            / "OpenAI"
+            / "Codex"
+            / "bin"
+            / "codex.exe",
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "OpenAI"
+            / "Codex"
+            / "bin"
+            / "codex.exe",
+            Path(os.environ.get("APPDATA", "")) / "npm" / "codex.cmd",
+            Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+
+    raise CodexError(
+        "Codex CLI를 찾을 수 없습니다. "
+        "동봉된 'Codex_Cli설치-처음 한번만 실행.bat'을 실행하거나 "
+        "npm install -g @openai/codex 로 설치해 주세요."
+    )
 
 
 def cli_prefix() -> list[str]:
@@ -220,7 +258,8 @@ def usable_messages(chat: dict) -> list[dict]:
 def build_prompt(
     chat: dict,
     store,
-    max_messages: int = 16,
+    max_messages: int = DEFAULT_CONTEXT_MESSAGES,
+    custom_instruction: str = "",
 ) -> tuple[str, list[str]]:
     # 빈 대기 메시지 등을 먼저 제외한 뒤 대화 길이를 제한합니다.
     messages = usable_messages(chat)
@@ -234,10 +273,17 @@ def build_prompt(
     while selected and selected[0]["role"] != "user":
         selected.pop(0)
 
+    clean_instruction = str(custom_instruction or "").strip()[
+        :MAX_CUSTOM_INSTRUCTION_CHARS
+    ]
+    instruction_bytes = len(clean_instruction.encode("utf-8"))
+
     encoded: list[str] = []
     images: list[str] = []
-    char_count = len(INSTRUCTION) + 100
-    byte_count = len(INSTRUCTION.encode("utf-8")) + 100
+    char_count = len(INSTRUCTION) + len(clean_instruction) + 160
+    byte_count = (
+        len(INSTRUCTION.encode("utf-8")) + instruction_bytes + 160
+    )
     image_bytes = 0
     omitted = len(messages) - len(selected)
 
@@ -259,8 +305,16 @@ def build_prompt(
             attachments = []
             for attachment in message.get("attachments", []):
                 path = store.absolute(attachment["path"])
-                validate_attachment(path)
                 name = str(attachment.get("name", path.name))
+                if not path.is_file() and reverse_index > 0:
+                    attachments.append({
+                        "name": name,
+                        "type": "missing",
+                        "note": "이전 첨부파일이 디스크에서 삭제되었습니다.",
+                    })
+                    continue
+
+                validate_attachment(path)
 
                 if path.suffix.lower() in SUPPORTED_IMAGES:
                     candidate_images.append(str(path))
@@ -328,6 +382,9 @@ def build_prompt(
         "omitted_older_messages": omitted,
         "messages": final_items,
     }
+    if clean_instruction:
+        payload["user_custom_instruction"] = clean_instruction
+
     prompt = INSTRUCTION + "\n" + json.dumps(
         payload, ensure_ascii=False
     )
@@ -375,6 +432,7 @@ def run_exec(
             "exec",
             "-",
             "--skip-git-repo-check",
+            "--ephemeral",
             "--sandbox",
             "read-only",
             "-C",

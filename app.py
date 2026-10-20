@@ -1,4 +1,4 @@
-"""Pastel AI Studio — PySide6 채팅 클라이언트."""
+"""Pastel AI Studio v1.0.1 — PySide6 채팅 클라이언트."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import html
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 import markdown
@@ -20,6 +21,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QFont,
     QIcon,
+    QImage,
     QPixmap,
     QSyntaxHighlighter,
     QTextCharFormat,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -40,6 +43,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -48,13 +52,20 @@ from PySide6.QtWidgets import (
 
 import codex_client
 from core import (
+    APP_DIR,
+    APP_VERSION,
+    DEFAULT_CONTEXT_MESSAGES,
     LANG_EXTENSIONS,
     MAX_ATTACHMENTS,
+    MAX_CUSTOM_INSTRUCTION_CHARS,
     SUPPORTED_FILES,
+    SUPPORTED_IMAGES,
     LocalStore,
     atomic_text,
     code_blocks,
+    export_chat_markdown,
     new_id,
+    search_chats,
     split_code,
     validate_attachment,
 )
@@ -88,7 +99,12 @@ QPushButton:hover { background:#C6EDDE; }
 QPushButton:disabled { background:#ECEBF0; color:#ABB0BA; }
 QPushButton#primary { background:#CEC3FA; color:#473B78; }
 QPushButton#danger { background:#FCE1E7; color:#96506A; }
-QComboBox, QTextEdit, QPlainTextEdit, QListWidget {
+QPushButton#subtle {
+    background:#F2EFFC; color:#5A4E8C;
+    padding:4px 9px; font-size:12px; border-radius:7px;
+}
+QPushButton#subtle:hover { background:#E3DCFA; }
+QComboBox, QLineEdit, QSpinBox, QTextEdit, QPlainTextEdit, QListWidget {
     background: transparent; border:1px solid #E1DFEC;
     border-radius:9px; padding:7px;
 }
@@ -96,6 +112,18 @@ QListWidget::item { padding:10px; }
 QListWidget::item:selected { background:#DBD2FF; color:#44396C; }
 QScrollArea { border:0; background:transparent; }
 """
+
+
+def find_icon_path() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parent / "sch.ico",
+        Path(sys.executable).resolve().parent / "sch.ico",
+        Path(getattr(sys, "_MEIPASS", "")) / "sch.ico",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
 
 
 class TaskWorker(QThread):
@@ -118,11 +146,21 @@ class ApiWorker(QThread):
     failure = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, model: str, store: LocalStore, chat: dict, parent=None):
+    def __init__(
+        self,
+        model: str,
+        store: LocalStore,
+        chat: dict,
+        max_context_messages: int = DEFAULT_CONTEXT_MESSAGES,
+        custom_instruction: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.model = model
         self.store = store
         self.chat = copy.deepcopy(chat)
+        self.max_context_messages = max_context_messages
+        self.custom_instruction = custom_instruction
         self.cancel_event = threading.Event()
 
     def cancel(self):
@@ -131,7 +169,10 @@ class ApiWorker(QThread):
     def run(self):
         try:
             prompt, images = codex_client.build_prompt(
-                self.chat, self.store
+                self.chat,
+                self.store,
+                max_messages=self.max_context_messages,
+                custom_instruction=self.custom_instruction,
             )
             text = codex_client.run_exec(
                 prompt,
@@ -280,13 +321,13 @@ class CodePanel(QFrame):
         header.addWidget(QLabel(language or "text"))
         header.addStretch()
 
-        copy_button = QPushButton("복사")
-        copy_button.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.code)
-        )
-        header.addWidget(copy_button)
+        self.copy_button = QPushButton("복사")
+        self.copy_button.setObjectName("subtle")
+        self.copy_button.clicked.connect(self.copy_code)
+        header.addWidget(self.copy_button)
 
         save_button = QPushButton("코드 저장")
+        save_button.setObjectName("subtle")
         save_button.clicked.connect(self.export_code)
         header.addWidget(save_button)
         layout.addLayout(header)
@@ -303,6 +344,13 @@ class CodePanel(QFrame):
             editor.document(), language
         )
         layout.addWidget(editor)
+
+    def copy_code(self):
+        QApplication.clipboard().setText(self.code)
+        self.copy_button.setText("복사됨 ✓")
+        QTimer.singleShot(
+            1400, lambda: self.copy_button.setText("복사")
+        )
 
     def export_code(self):
         extension = LANG_EXTENSIONS.get(
@@ -321,8 +369,17 @@ class CodePanel(QFrame):
 
 
 class MessageBubble(QFrame):
-    def __init__(self, message: dict, store: LocalStore, parent=None):
+    regenerate_requested = Signal()
+
+    def __init__(
+        self,
+        message: dict,
+        store: LocalStore,
+        can_regenerate: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
+        self.message_text = str(message.get("text", ""))
         own = message.get("role") == "user"
         self.setObjectName(
             "userBubble" if own else "assistantBubble"
@@ -331,9 +388,26 @@ class MessageBubble(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
-        layout.addWidget(QLabel("나 🌸" if own else "Pastel AI ✨"))
 
-        text = message.get("text", "")
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("나 🌸" if own else "Pastel AI ✨"))
+        top_row.addStretch()
+
+        if self.message_text.strip():
+            self.copy_btn = QPushButton("복사")
+            self.copy_btn.setObjectName("subtle")
+            self.copy_btn.clicked.connect(self.copy_message)
+            top_row.addWidget(self.copy_btn)
+
+        if can_regenerate and not own:
+            regen_btn = QPushButton("↻ 다시 생성")
+            regen_btn.setObjectName("subtle")
+            regen_btn.clicked.connect(self.regenerate_requested.emit)
+            top_row.addWidget(regen_btn)
+
+        layout.addLayout(top_row)
+
+        text = self.message_text
         content = (
             [("prose", text, "")]
             if own
@@ -341,9 +415,9 @@ class MessageBubble(QFrame):
         )
 
         if not text.strip() and not own:
-            pending = QLabel("응답을 작성하고 있어요…")
-            pending.setObjectName("quiet")
-            layout.addWidget(pending)
+            self.pending_label = QLabel("응답을 작성하고 있어요…")
+            self.pending_label.setObjectName("quiet")
+            layout.addWidget(self.pending_label)
 
         for kind, body, language in content:
             if kind == "code":
@@ -374,6 +448,27 @@ class MessageBubble(QFrame):
             label.setWordWrap(True)
             layout.addWidget(label)
 
+            # 첨부된 이미지 미리보기 표시
+            for item in attachments:
+                rel_path = item.get("path")
+                if not isinstance(rel_path, str):
+                    continue
+                if Path(rel_path).suffix.lower() not in SUPPORTED_IMAGES:
+                    continue
+                try:
+                    img_path = store.absolute(rel_path)
+                    pixmap = QPixmap(str(img_path))
+                    if not pixmap.isNull():
+                        thumb = QLabel()
+                        thumb.setPixmap(pixmap.scaled(
+                            320, 220,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        ))
+                        layout.addWidget(thumb)
+                except (OSError, ValueError):
+                    continue
+
         for artifact in message.get("artifacts", []):
             if artifact.get("kind") != "image":
                 continue
@@ -392,6 +487,14 @@ class MessageBubble(QFrame):
             except (OSError, ValueError):
                 continue
 
+    def copy_message(self):
+        QApplication.clipboard().setText(self.message_text)
+        if hasattr(self, "copy_btn"):
+            self.copy_btn.setText("복사됨 ✓")
+            QTimer.singleShot(
+                1400, lambda: self.copy_btn.setText("복사")
+            )
+
 
 class DropZone(QFrame):
     dropped = Signal(list)
@@ -401,7 +504,9 @@ class DropZone(QFrame):
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
         layout = QVBoxLayout(self)
-        label = QLabel("📎 파일을 끌어놓거나 '파일 첨부'를 눌러주세요")
+        label = QLabel(
+            "📎 파일을 끌어놓거나 '파일 첨부' 클릭 · 입력창에서 Ctrl+V로 캡처 이미지 붙여넣기 가능"
+        )
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
 
@@ -439,6 +544,7 @@ class DropZone(QFrame):
 class PromptEdit(QTextEdit):
     send_requested = Signal()
     dropped = Signal(list)
+    image_pasted = Signal(QImage)
 
     def keyPressEvent(self, event):
         if (
@@ -449,6 +555,33 @@ class PromptEdit(QTextEdit):
             self.send_requested.emit()
         else:
             super().keyPressEvent(event)
+
+    def canInsertFromMimeData(self, source):
+        if source.hasImage() or (
+            source.hasUrls()
+            and any(url.isLocalFile() for url in source.urls())
+        ):
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        if source.hasUrls():
+            paths = [
+                url.toLocalFile()
+                for url in source.urls()
+                if url.isLocalFile()
+            ]
+            if paths:
+                self.dropped.emit(paths)
+                return
+
+        if source.hasImage():
+            image = QApplication.clipboard().image()
+            if not image.isNull():
+                self.image_pasted.emit(image)
+                return
+
+        super().insertFromMimeData(source)
 
     def dragEnterEvent(self, event):
         mime = event.mimeData()
@@ -482,15 +615,21 @@ class PromptEdit(QTextEdit):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent, model: str):
+    def __init__(
+        self,
+        parent,
+        model: str,
+        custom_instruction: str = "",
+        max_context_messages: int = DEFAULT_CONTEXT_MESSAGES,
+    ):
         super().__init__(parent)
         self.task = None
         self.login_process = None
-        self.setWindowTitle("설정 · Pastel AI Studio")
-        self.setMinimumWidth(480)
+        self.setWindowTitle(f"설정 · Pastel AI Studio v{APP_VERSION}")
+        self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
-        title = QLabel("ChatGPT 로그인 및 모델 설정")
+        title = QLabel("ChatGPT 로그인 및 모델·지침 설정")
         title.setObjectName("headline")
         layout.addWidget(title)
 
@@ -520,14 +659,37 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        layout.addWidget(QLabel("모델 · 비워 두면 Codex 기본 모델"))
+        layout.addWidget(QLabel("모델 · 비워 두면 Codex 기본 모델 사용"))
         self.model = QComboBox()
         self.model.setEditable(True)
-        self.model.addItem("")
+        for preset in codex_client.RECOMMENDED_MODELS:
+            self.model.addItem(preset)
         self.model.setCurrentText(model)
         layout.addWidget(self.model)
 
+        ctx_row = QHBoxLayout()
+        ctx_row.addWidget(QLabel("문맥 유지 메시지 수 (최근 대화 범위):"))
+        self.context_spin = QSpinBox()
+        self.context_spin.setRange(2, 64)
+        self.context_spin.setValue(max_context_messages)
+        self.context_spin.setSuffix("개")
+        ctx_row.addWidget(self.context_spin)
+        ctx_row.addStretch()
+        layout.addLayout(ctx_row)
+
+        layout.addWidget(
+            QLabel("맞춤 지침 (선택 사항 · 원하는 말투나 답변 규칙 입력)")
+        )
+        self.custom_instruction = QPlainTextEdit()
+        self.custom_instruction.setPlaceholderText(
+            "예: 항상 한국어로 친절하게 설명하고, 파이썬 코드는 타입 힌트를 포함해 작성해 줘."
+        )
+        self.custom_instruction.setPlainText(custom_instruction)
+        self.custom_instruction.setFixedHeight(90)
+        layout.addWidget(self.custom_instruction)
+
         self.finish_button = QPushButton("설정 완료")
+        self.finish_button.setObjectName("primary")
         self.finish_button.clicked.connect(self.accept)
         layout.addWidget(self.finish_button)
 
@@ -560,9 +722,7 @@ class SettingsDialog(QDialog):
         self.task.start()
 
     def refresh(self):
-        self.state.setText("ログイン状態を確認中…".replace(
-            "ログイン状態を確認中…", "로그인 상태 확인 중…"
-        ))
+        self.state.setText("로그인 상태 확인 중…")
         self.begin_task(codex_client.login_status)
 
     def do_logout(self):
@@ -747,6 +907,12 @@ class MainWindow(QMainWindow):
         self.chats = self.store.load_chats()
         settings = self.store.settings()
         self.model = str(settings.get("model", ""))
+        self.custom_instruction = str(
+            settings.get("custom_instruction", "")
+        )
+        self.max_context_messages = int(
+            settings.get("max_context_messages", DEFAULT_CONTEXT_MESSAGES)
+        )
 
         self.chat_id = None
         self.attachments = []
@@ -756,10 +922,19 @@ class MainWindow(QMainWindow):
         self.pending_chat_id = None
         self.logged_in = False
         self.auth_known = False
+        self.generation_started_at = 0.0
 
-        self.setWindowTitle("Pastel AI Studio ✿")
-        self.resize(1240, 820)
-        self.setMinimumSize(880, 600)
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self.update_elapsed_status)
+
+        self.setWindowTitle(f"Pastel AI Studio v{APP_VERSION} ✿")
+        icon_path = find_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+        self.resize(1260, 840)
+        self.setMinimumSize(900, 620)
         self.build_ui()
 
         if self.chats:
@@ -796,7 +971,7 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("sidebar")
         left = QVBoxLayout(sidebar)
 
-        brand = QLabel("✿ Pastel AI Studio")
+        brand = QLabel(f"✿ Pastel AI Studio v{APP_VERSION}")
         brand.setObjectName("headline")
         left.addWidget(brand)
 
@@ -804,18 +979,33 @@ class MainWindow(QMainWindow):
         self.new_button.clicked.connect(self.new_chat)
         left.addWidget(self.new_button)
 
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 대화 제목·내용 검색…")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self.refresh_chats)
+        left.addWidget(self.search_input)
+
         self.chat_list = QListWidget()
         self.chat_list.itemClicked.connect(
             lambda item: self.show_chat(
                 item.data(Qt.ItemDataRole.UserRole)
             )
         )
+        self.chat_list.itemDoubleClicked.connect(
+            lambda item: self.rename_chat()
+        )
         left.addWidget(self.chat_list, 1)
+
+        chat_actions = QHBoxLayout()
+        self.rename_button = QPushButton("✏️ 이름 변경")
+        self.rename_button.clicked.connect(self.rename_chat)
+        chat_actions.addWidget(self.rename_button)
 
         self.delete_button = QPushButton("대화 삭제")
         self.delete_button.setObjectName("danger")
         self.delete_button.clicked.connect(self.delete_chat)
-        left.addWidget(self.delete_button)
+        chat_actions.addWidget(self.delete_button)
+        left.addLayout(chat_actions)
 
         gallery = QPushButton("🖼️ 이미지 갤러리")
         gallery.clicked.connect(self.open_gallery)
@@ -854,6 +1044,7 @@ class MainWindow(QMainWindow):
         header.addWidget(self.heading, 1)
 
         for title, callback in (
+            ("대화 내보내기", self.export_full_chat),
             ("답변 저장", self.save_answer),
             ("코드 저장", self.save_last_code),
             ("이미지 저장", self.save_last_image),
@@ -871,7 +1062,7 @@ class MainWindow(QMainWindow):
         self.stream_layout.addStretch()
         self.scroll.setWidget(stream)
 
-# 답변 표시 후 레이아웃 높이가 달라져도 맨 아래로 이동합니다.
+        # 답변 표시 후 레이아웃 높이가 달라져도 맨 아래로 이동합니다.
         self.scroll.verticalScrollBar().rangeChanged.connect(
             self.scroll_to_bottom
         )
@@ -892,20 +1083,29 @@ class MainWindow(QMainWindow):
         self.file_button.clicked.connect(self.pick_attachments)
         toolbar.addWidget(self.file_button)
 
-        self.clear_files_button = QPushButton("첨부 취소")
+        self.remove_one_file_button = QPushButton("개별 첨부 삭제")
+        self.remove_one_file_button.clicked.connect(
+            self.remove_selected_attachment
+        )
+        self.remove_one_file_button.setEnabled(False)
+        toolbar.addWidget(self.remove_one_file_button)
+
+        self.clear_files_button = QPushButton("전체 첨부 취소")
         self.clear_files_button.clicked.connect(self.clear_attachments)
+        self.clear_files_button.setEnabled(False)
         toolbar.addWidget(self.clear_files_button)
         toolbar.addStretch()
         right.addLayout(toolbar)
 
         self.prompt = PromptEdit()
         self.prompt.setAcceptRichText(False)
-        self.prompt.setFixedHeight(91)
+        self.prompt.setFixedHeight(95)
         self.prompt.setPlaceholderText(
-            "메시지를 입력하세요. Ctrl+Enter로 전송"
+            "메시지를 입력하세요. Ctrl+Enter로 전송 · Ctrl+V로 클립보드 이미지 첨부"
         )
         self.prompt.send_requested.connect(self.submit)
         self.prompt.dropped.connect(self.add_path_list)
+        self.prompt.image_pasted.connect(self.add_clipboard_image)
         right.addWidget(self.prompt)
 
         bottom = QHBoxLayout()
@@ -926,7 +1126,15 @@ class MainWindow(QMainWindow):
         right.addLayout(bottom)
 
         splitter.addWidget(panel)
-        splitter.setSizes([292, 930])
+        splitter.setSizes([305, 955])
+
+    def update_elapsed_status(self):
+        if not self.generation_active():
+            return
+        elapsed = max(1, int(time.monotonic() - self.generation_started_at))
+        self.status.setText(
+            f"AI가 답변을 작성 중입니다… (⏱ {elapsed}초 경과 · 완료 후 한 번에 표시)"
+        )
 
     def check_login(self):
         if self.auth_task is not None:
@@ -973,20 +1181,43 @@ class MainWindow(QMainWindow):
             if self.logged_in
             else "🔑 로그인 필요"
         )
+        custom_badge = (
+            " · 맞춤 지침 ON" if self.custom_instruction else ""
+        )
         self.key_indicator.setText(
-            state + "\n모델: " + (self.model or "Codex 기본")
+            state
+            + "\n모델: "
+            + (self.model or "Codex 기본")
+            + f" (문맥 {self.max_context_messages}개{custom_badge})"
         )
 
     def open_settings(self):
         if self.generation_active() or self.auth_task is not None:
             return
 
-        dialog = SettingsDialog(self, self.model)
+        dialog = SettingsDialog(
+            self,
+            self.model,
+            self.custom_instruction,
+            self.max_context_messages,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            candidate = dialog.model.currentText().strip()
+            candidate_model = dialog.model.currentText().strip()
+            candidate_instruction = (
+                dialog.custom_instruction.toPlainText().strip()[
+                    :MAX_CUSTOM_INSTRUCTION_CHARS
+                ]
+            )
+            candidate_context = dialog.context_spin.value()
             try:
-                self.store.save_settings({"model": candidate})
-                self.model = candidate
+                self.store.save_settings({
+                    "model": candidate_model,
+                    "custom_instruction": candidate_instruction,
+                    "max_context_messages": candidate_context,
+                })
+                self.model = candidate_model
+                self.custom_instruction = candidate_instruction
+                self.max_context_messages = candidate_context
             except OSError as exc:
                 QMessageBox.warning(self, "설정 저장 실패", str(exc))
 
@@ -1006,9 +1237,17 @@ class MainWindow(QMainWindow):
             return False
 
     def refresh_chats(self):
+        query = (
+            self.search_input.text()
+            if hasattr(self, "search_input")
+            else ""
+        )
         self.chat_list.clear()
-        for cid, chat in reversed(list(self.chats.items())):
-            item = QListWidgetItem(chat.get("title", "대화"))
+        for cid, chat in search_chats(self.chats, query):
+            msg_count = len(chat.get("messages", []))
+            title = chat.get("title", "대화")
+            label = f"{title} ({msg_count})" if msg_count else title
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, cid)
             self.chat_list.addItem(item)
             if cid == self.chat_id:
@@ -1039,6 +1278,32 @@ class MainWindow(QMainWindow):
         self.clear_attachments()
         self.refresh_chats()
         self.render_chat()
+
+    def rename_chat(self):
+        if not self.chat_id or self.generation_active():
+            return
+        chat = self.chats.get(self.chat_id)
+        if not chat:
+            return
+
+        current_title = str(chat.get("title", "새로운 대화"))
+        new_title, accepted = QInputDialog.getText(
+            self,
+            "대화 이름 변경",
+            "새로운 대화 제목을 입력하세요:",
+            text=current_title,
+        )
+        if not accepted:
+            return
+
+        cleaned = new_title.strip()[:60]
+        if not cleaned or cleaned == current_title:
+            return
+
+        chat["title"] = cleaned
+        if self.persist():
+            self.heading.setText(cleaned)
+            self.refresh_chats()
 
     def delete_chat(self):
         if not self.chat_id or self.generation_active():
@@ -1086,7 +1351,6 @@ class MainWindow(QMainWindow):
         scrollbar = self.scroll.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-
     def render_chat(self):
         while self.stream_layout.count() > 1:
             item = self.stream_layout.takeAt(0)
@@ -1095,13 +1359,29 @@ class MainWindow(QMainWindow):
 
         chat = self.current_chat()
         self.heading.setText(chat.get("title", "새로운 대화"))
+        messages = chat.get("messages", [])
 
-        for message in chat.get("messages", []):
+        for idx, message in enumerate(messages):
             row = QWidget()
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
 
-            bubble = MessageBubble(message, self.store)
+            is_last_assistant = (
+                idx == len(messages) - 1
+                and message.get("role") == "assistant"
+                and message.get("status") != "pending"
+                and not self.generation_active()
+            )
+            bubble = MessageBubble(
+                message,
+                self.store,
+                can_regenerate=is_last_assistant,
+            )
+            if is_last_assistant:
+                bubble.regenerate_requested.connect(
+                    self.regenerate_last_response
+                )
+
             if message.get("role") == "user":
                 layout.addStretch(1)
                 layout.addWidget(bubble, 6)
@@ -1115,7 +1395,6 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, self.scroll_to_bottom)
 
-
     def pick_attachments(self):
         patterns = " ".join(
             "*" + suffix for suffix in sorted(SUPPORTED_FILES)
@@ -1125,6 +1404,22 @@ class MainWindow(QMainWindow):
             f"지원 파일 ({patterns});;모든 파일 (*.*)",
         )
         self.add_path_list(paths)
+
+    def add_clipboard_image(self, image: QImage):
+        if self.generation_active():
+            return
+        try:
+            clip_dir = APP_DIR / "clipboard"
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            clip_path = clip_dir / f"clipboard_{new_id()}.png"
+            if not image.save(str(clip_path), "PNG"):
+                raise OSError("클립보드 이미지를 저장하지 못했습니다.")
+            self.add_path_list([str(clip_path)])
+            self.status.setText(
+                f"클립보드 이미지가 첨부되었습니다: {clip_path.name}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "클립보드 첨부 실패", str(exc))
 
     def add_path_list(self, paths):
         if self.generation_active():
@@ -1150,18 +1445,104 @@ class MainWindow(QMainWindow):
 
         self.update_attachments()
 
+    def remove_selected_attachment(self):
+        if not self.attachments or self.generation_active():
+            return
+
+        options = [
+            f"{idx + 1}. {Path(p).name}"
+            for idx, p in enumerate(self.attachments)
+        ]
+        chosen, accepted = QInputDialog.getItem(
+            self,
+            "개별 첨부 삭제",
+            "제외할 첨부파일을 선택하세요:",
+            options,
+            0,
+            False,
+        )
+        if accepted and chosen in options:
+            del self.attachments[options.index(chosen)]
+            self.update_attachments()
+
     def update_attachments(self):
+        count = len(self.attachments)
         self.attach_summary.setText(
-            "📎 " + ", ".join(
-                Path(path).name for path in self.attachments
-            )
+            f"📎 첨부파일 ({count}/{MAX_ATTACHMENTS}): "
+            + ", ".join(Path(path).name for path in self.attachments)
             if self.attachments else "첨부파일 없음"
         )
+        has_files = bool(self.attachments) and not self.generation_active()
+        if hasattr(self, "remove_one_file_button"):
+            self.remove_one_file_button.setEnabled(has_files)
+        if hasattr(self, "clear_files_button"):
+            self.clear_files_button.setEnabled(has_files)
 
     def clear_attachments(self):
         self.attachments.clear()
         if hasattr(self, "attach_summary"):
             self.update_attachments()
+
+    def start_worker_for_chat(self, cid: str, assistant: dict):
+        chat = self.chats[cid]
+        self.pending_message = assistant
+        self.pending_chat_id = cid
+        self.generation_started_at = time.monotonic()
+        self.elapsed_timer.start()
+        self.refresh_chats()
+        self.render_chat()
+        self.set_busy(True)
+        self.status.setText(
+            "AI가 답변을 작성 중입니다… (⏱ 0초 경과 · 완료 후 한 번에 표시)"
+        )
+
+        self.worker = ApiWorker(
+            self.model,
+            self.store,
+            chat,
+            max_context_messages=self.max_context_messages,
+            custom_instruction=self.custom_instruction,
+            parent=self,
+        )
+        self.worker.success.connect(self.on_success)
+        self.worker.failure.connect(self.on_failure)
+        self.worker.cancelled.connect(self.on_cancelled)
+        self.worker.finished.connect(self.on_worker_finished)
+
+        try:
+            self.worker.start()
+        except Exception as exc:
+            self.on_failure(str(exc))
+            self.on_worker_finished()
+
+    def regenerate_last_response(self):
+        if self.generation_active() or self.auth_task is not None:
+            return
+        if not self.logged_in:
+            self.open_settings()
+            return
+        if not self.chat_id or self.chat_id not in self.chats:
+            return
+
+        cid = self.chat_id
+        chat = self.chats[cid]
+        messages = chat.get("messages", [])
+        if (
+            len(messages) < 2
+            or messages[-1].get("role") != "assistant"
+            or messages[-2].get("role") != "user"
+        ):
+            return
+
+        assistant = messages[-1]
+        assistant["text"] = ""
+        assistant["artifacts"] = []
+        assistant["status"] = "pending"
+
+        if not self.persist():
+            return
+
+        self.start_worker_for_chat(cid, assistant)
 
     def submit(self):
         if self.generation_active() or self.auth_task is not None:
@@ -1239,40 +1620,26 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.pending_message = assistant
-        self.pending_chat_id = cid
         self.prompt.clear()
         self.clear_attachments()
-        self.refresh_chats()
-        self.render_chat()
-        self.set_busy(True)
-        self.status.setText(
-            "AI가 답변을 작성 중입니다… 완료 후 한 번에 표시됩니다."
-        )
-
-        self.worker = ApiWorker(self.model, self.store, chat, self)
-        self.worker.success.connect(self.on_success)
-        self.worker.failure.connect(self.on_failure)
-        self.worker.cancelled.connect(self.on_cancelled)
-        self.worker.finished.connect(self.on_worker_finished)
-
-        try:
-            self.worker.start()
-        except Exception as exc:
-            self.on_failure(str(exc))
-            self.on_worker_finished()
+        self.start_worker_for_chat(cid, assistant)
 
     def set_busy(self, busy):
         for widget in (
             self.new_button,
+            self.search_input,
             self.chat_list,
+            self.rename_button,
             self.delete_button,
             self.file_button,
-            self.clear_files_button,
             self.drop_zone,
             self.prompt,
         ):
             widget.setEnabled(not busy)
+
+        has_files = bool(self.attachments) and not busy
+        self.remove_one_file_button.setEnabled(has_files)
+        self.clear_files_button.setEnabled(has_files)
 
         self.setting_button.setEnabled(
             not busy and self.auth_task is None
@@ -1283,6 +1650,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(busy)
 
     def finish_response(self, text, state):
+        self.elapsed_timer.stop()
         message = self.pending_message
         cid = self.pending_chat_id
 
@@ -1292,13 +1660,14 @@ class MainWindow(QMainWindow):
         message["text"] = text
         message["status"] = state
         errors = []
+        elapsed = max(1, int(time.monotonic() - self.generation_started_at))
 
         try:
             if state == "complete":
                 try:
                     artifacts = self.store.archive_answer(cid, message)
                     self.status.setText(
-                        f"완료 · 결과물 {len(artifacts)}개 자동 저장됨"
+                        f"완료 ({elapsed}초) · 결과물 {len(artifacts)}개 자동 저장됨"
                     )
                 except Exception as exc:
                     errors.append("결과물 저장 실패: " + str(exc))
@@ -1318,6 +1687,7 @@ class MainWindow(QMainWindow):
         finally:
             self.pending_message = None
             self.pending_chat_id = None
+            self.refresh_chats()
             self.render_chat()
 
         if errors:
@@ -1335,6 +1705,7 @@ class MainWindow(QMainWindow):
         self.finish_response("생성이 중단되었습니다.", "cancelled")
 
     def on_worker_finished(self):
+        self.elapsed_timer.stop()
         worker = self.worker
         self.worker = None
 
@@ -1380,6 +1751,22 @@ class MainWindow(QMainWindow):
                 self.status.setText("파일을 저장했습니다.")
             except OSError as exc:
                 QMessageBox.warning(self, "저장 오류", str(exc))
+
+    def export_full_chat(self):
+        chat = self.current_chat()
+        if not chat.get("messages"):
+            QMessageBox.information(
+                self, "대화 없음", "내보낼 대화 내용이 없습니다."
+            )
+            return
+
+        markdown_text = export_chat_markdown(chat)
+        self.export_text(
+            "대화 전체 내보내기",
+            "chat_export.md",
+            markdown_text,
+            "Markdown (*.md);;텍스트 (*.txt)",
+        )
 
     def save_answer(self):
         message = self.last_assistant()
@@ -1441,7 +1828,7 @@ class MainWindow(QMainWindow):
         images = self.store.image_artifacts(self.current_chat())
         if not images:
             QMessageBox.information(
-                self, "이미지 없음", "저장된 이미지가 없습니다."
+                self, "이미지 없음", "이 대화에 저장된 이미지가 없습니다."
             )
             return
 
@@ -1459,6 +1846,7 @@ class MainWindow(QMainWindow):
                 and path.resolve() != Path(destination).resolve()
             ):
                 shutil.copy2(path, destination)
+                self.status.setText("이미지를 저장했습니다.")
 
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "이미지 저장 실패", str(exc))

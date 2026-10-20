@@ -1,4 +1,4 @@
-"""대화 저장, 첨부파일 검증 및 추출, 답변 보관."""
+"""대화 저장, 첨부파일 검증 및 추출, 답변 보관 (v1.0.1)."""
 
 from __future__ import annotations
 
@@ -12,13 +12,16 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+APP_VERSION = "1.0.1"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {
     ".txt", ".md", ".csv", ".json", ".py", ".js", ".ts",
+    ".jsx", ".tsx", ".vue", ".svelte",
     ".html", ".css", ".xml", ".yaml", ".yml", ".log", ".sql",
-    ".java", ".cpp", ".c", ".h", ".ipynb", ".sh", ".ps1",
-    ".ini", ".toml", ".rs", ".go", ".rb",
+    ".java", ".cpp", ".c", ".h", ".cs", ".kt", ".swift", ".php",
+    ".ipynb", ".sh", ".ps1", ".bat", ".cmd",
+    ".ini", ".toml", ".rs", ".go", ".rb", ".r", ".lua", ".dart", ".scala",
 }
 SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_FILES = SUPPORTED_TEXT | SUPPORTED_IMAGES | {".pdf", ".docx"}
@@ -29,6 +32,8 @@ MAX_EXTRACTED_CHARS = 100_000
 MAX_DOCX_UNCOMPRESSED_BYTES = 48 * 1024 * 1024
 MAX_PDF_PAGES = 200
 MAX_IMAGE_PIXELS = 24_000_000
+MAX_CUSTOM_INSTRUCTION_CHARS = 4_000
+DEFAULT_CONTEXT_MESSAGES = 16
 
 CODE_RE = re.compile(
     r"^```([^\n`]*)\n(.*?)^```[ \t]*$",
@@ -38,15 +43,26 @@ CODE_RE = re.compile(
 LANG_EXTENSIONS = {
     "python": ".py", "py": ".py",
     "javascript": ".js", "js": ".js",
+    "jsx": ".jsx",
     "typescript": ".ts", "ts": ".ts",
+    "tsx": ".tsx",
     "html": ".html", "css": ".css", "json": ".json",
-    "cpp": ".cpp", "c++": ".cpp", "c": ".c",
-    "java": ".java", "sql": ".sql",
-    "bash": ".sh", "sh": ".sh",
+    "cpp": ".cpp", "c++": ".cpp", "c": ".c", "h": ".h",
+    "java": ".java", "kotlin": ".kt", "kt": ".kt",
+    "swift": ".swift", "php": ".php",
+    "sql": ".sql",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh",
     "powershell": ".ps1", "ps1": ".ps1",
+    "batch": ".bat", "bat": ".bat", "cmd": ".cmd",
     "xml": ".xml", "yaml": ".yaml", "yml": ".yaml",
-    "rust": ".rs", "go": ".go", "ruby": ".rb",
-    "csharp": ".cs", "cs": ".cs", "text": ".txt",
+    "toml": ".toml", "ini": ".ini",
+    "rust": ".rs", "rs": ".rs",
+    "go": ".go", "golang": ".go",
+    "ruby": ".rb", "rb": ".rb",
+    "csharp": ".cs", "cs": ".cs",
+    "r": ".r", "lua": ".lua", "dart": ".dart", "scala": ".scala",
+    "markdown": ".md", "md": ".md",
+    "text": ".txt", "plaintext": ".txt",
 }
 
 
@@ -233,7 +249,7 @@ def read_attachment(
             with path.open(encoding="utf-8-sig") as handle:
                 extracted = handle.read(limit + 1)
         except UnicodeDecodeError:
-            with path.open(encoding="cp949") as handle:
+            with path.open(encoding="cp949", errors="replace") as handle:
                 extracted = handle.read(limit + 1)
 
         truncated = len(extracted) > limit
@@ -243,6 +259,71 @@ def read_attachment(
         extracted += "\n[파일 내용이 길어 일부만 전달되었습니다.]"
 
     return extracted
+
+
+def search_chats(
+    chats: dict[str, dict],
+    query: str,
+) -> list[tuple[str, dict]]:
+    """대화 제목 및 메시지 본문에서 검색어와 일치하는 대화 목록을 최신순으로 반환."""
+    keyword = query.strip().lower()
+    items = list(reversed(list(chats.items())))
+    if not keyword:
+        return items
+
+    matched = []
+    for cid, chat in items:
+        title = str(chat.get("title", "")).lower()
+        if keyword in title:
+            matched.append((cid, chat))
+            continue
+
+        for message in chat.get("messages", []):
+            text = str(message.get("text", "")).lower()
+            if keyword in text:
+                matched.append((cid, chat))
+                break
+
+    return matched
+
+
+def export_chat_markdown(chat: dict) -> str:
+    """대화 전체를 읽기 좋은 Markdown 문서로 변환."""
+    title = str(chat.get("title") or "대화")
+    lines = [
+        f"# {title}",
+        "",
+        f"- 내보낸 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 프로그램: Pastel AI Studio v{APP_VERSION}",
+        "",
+        "---",
+        "",
+    ]
+
+    for message in chat.get("messages", []):
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+
+        header = "## 🌸 나" if role == "user" else "## ✨ Pastel AI"
+        lines.append(header)
+        lines.append("")
+
+        attachments = message.get("attachments", [])
+        if attachments:
+            names = ", ".join(
+                str(item.get("name", "파일")) for item in attachments
+            )
+            lines.append(f"> 📎 첨부파일: {names}")
+            lines.append("")
+
+        body = str(message.get("text", "")).strip()
+        lines.append(body or "_(내용 없음)_")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 class LocalStore:
@@ -335,7 +416,21 @@ class LocalStore:
         return result
 
     def settings(self) -> dict:
-        return self._load_json(self.settings_file)
+        raw = self._load_json(self.settings_file)
+        try:
+            context_limit = int(
+                raw.get("max_context_messages", DEFAULT_CONTEXT_MESSAGES)
+            )
+        except (TypeError, ValueError):
+            context_limit = DEFAULT_CONTEXT_MESSAGES
+
+        return {
+            "model": str(raw.get("model", "")).strip(),
+            "custom_instruction": str(
+                raw.get("custom_instruction", "")
+            ).strip()[:MAX_CUSTOM_INSTRUCTION_CHARS],
+            "max_context_messages": max(2, min(64, context_limit)),
+        }
 
     def save_chats(self, chats: dict) -> None:
         atomic_text(
@@ -344,13 +439,25 @@ class LocalStore:
         )
 
     def save_settings(self, settings: dict) -> None:
+        try:
+            context_limit = int(
+                settings.get(
+                    "max_context_messages", DEFAULT_CONTEXT_MESSAGES
+                )
+            )
+        except (TypeError, ValueError):
+            context_limit = DEFAULT_CONTEXT_MESSAGES
+
+        payload = {
+            "model": str(settings.get("model", "")).strip(),
+            "custom_instruction": str(
+                settings.get("custom_instruction", "")
+            ).strip()[:MAX_CUSTOM_INSTRUCTION_CHARS],
+            "max_context_messages": max(2, min(64, context_limit)),
+        }
         atomic_text(
             self.settings_file,
-            json.dumps(
-                {"model": str(settings.get("model", ""))},
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(payload, ensure_ascii=False, indent=2),
         )
 
     def chat_dir(self, chat_id: str) -> Path:
@@ -390,7 +497,10 @@ class LocalStore:
 
     def remove_attachments(self, attachments: list[dict]) -> None:
         for attachment in attachments:
-            self.absolute(attachment["path"]).unlink(missing_ok=True)
+            try:
+                self.absolute(attachment["path"]).unlink(missing_ok=True)
+            except ValueError:
+                continue
 
     def archive_answer(self, chat_id: str, message: dict) -> list[dict]:
         mid = checked_id(message["id"])
@@ -428,12 +538,35 @@ class LocalStore:
         return artifacts
 
     def image_artifacts(self, chat: dict) -> list[dict]:
-        return [
-            artifact
-            for message in chat.get("messages", [])
-            for artifact in message.get("artifacts", [])
-            if artifact.get("kind") == "image"
-        ]
+        """대화에 첨부된 이미지와 생성된 이미지 결과물을 모두 순서대로 반환."""
+        images: list[dict] = []
+        seen: set[str] = set()
+
+        for message in chat.get("messages", []):
+            for attachment in message.get("attachments", []):
+                rel_path = attachment.get("path")
+                if not isinstance(rel_path, str) or rel_path in seen:
+                    continue
+                if Path(rel_path).suffix.lower() in SUPPORTED_IMAGES:
+                    seen.add(rel_path)
+                    images.append({
+                        "kind": "image",
+                        "path": rel_path,
+                        "name": str(
+                            attachment.get("name", Path(rel_path).name)
+                        ),
+                    })
+
+            for artifact in message.get("artifacts", []):
+                if artifact.get("kind") != "image":
+                    continue
+                rel_path = artifact.get("path")
+                if not isinstance(rel_path, str) or rel_path in seen:
+                    continue
+                seen.add(rel_path)
+                images.append(artifact)
+
+        return images
 
     def delete_chat_files(self, chat_id: str) -> None:
         folder = self.chat_dir(chat_id)
