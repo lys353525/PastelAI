@@ -1,4 +1,4 @@
-"""Codex CLI 로그인 및 답변 생성 (v1.0.1)."""
+"""Codex CLI 및 OpenAI 호환 API 답변 생성 (v1.0.2)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import signal
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from core import (
@@ -406,8 +408,59 @@ def stderr_tail(path: Path, limit: int = 4000) -> str:
         return handle.read().decode("utf-8", errors="replace").strip()
 
 
-def run_exec(
+def run_api(
     prompt: str,
+    images: list[str],
+    model: str,
+    api_key: str,
+    api_base_url: str,
+    timeout: int = 600,
+) -> str:
+    """OpenAI 호환 Chat Completions API를 호출합니다."""
+    if not api_key:
+        raise CodexError("API 키를 입력해 주세요.")
+    if not model:
+        raise CodexError("API 사용 시 모델명을 입력해 주세요.")
+
+    content = [{"type": "text", "text": prompt}]
+    for image_path in images:
+        import base64
+        suffix = Path(image_path).suffix.lower()
+        media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(suffix, "image/png")
+        encoded = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media};base64,{encoded}"}})
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+    }
+    request = urllib.request.Request(
+        api_base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read(MAX_RESPONSE_BYTES + 1).decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        detail = ""
+        if isinstance(exc, urllib.error.HTTPError):
+            detail = exc.read(2000).decode("utf-8", errors="replace")
+        raise CodexError(f"API 요청 실패: {detail or exc}") from exc
+    try:
+        text = data["choices"][0]["message"]["content"]
+        if isinstance(text, list):
+            text = "".join(str(item.get("text", "")) for item in text if isinstance(item, dict))
+        text = str(text).strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise CodexError("API 응답 형식이 올바르지 않습니다.") from exc
+    if not text:
+        raise CodexError("API가 빈 답변을 반환했습니다.")
+    return text
+
+
+def run_exec(    prompt: str,
     images: list[str],
     model: str,
     is_cancelled,

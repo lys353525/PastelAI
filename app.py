@@ -151,12 +151,18 @@ class ApiWorker(QThread):
         model: str,
         store: LocalStore,
         chat: dict,
+        provider: str = "codex",
+        api_key: str = "",
+        api_base_url: str = "https://api.openai.com/v1",
         max_context_messages: int = DEFAULT_CONTEXT_MESSAGES,
         custom_instruction: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self.model = model
+        self.provider = provider
+        self.api_key = api_key
+        self.api_base_url = api_base_url
         self.store = store
         self.chat = copy.deepcopy(chat)
         self.max_context_messages = max_context_messages
@@ -174,12 +180,17 @@ class ApiWorker(QThread):
                 max_messages=self.max_context_messages,
                 custom_instruction=self.custom_instruction,
             )
-            text = codex_client.run_exec(
-                prompt,
-                images,
-                self.model,
-                self.cancel_event.is_set,
-            )
+            if self.provider == "api":
+                text = codex_client.run_api(
+                    prompt, images, self.model, self.api_key, self.api_base_url
+                )
+            else:
+                text = codex_client.run_exec(
+                    prompt,
+                    images,
+                    self.model,
+                    self.cancel_event.is_set,
+                )
 
             if self.cancel_event.is_set():
                 self.cancelled.emit()
@@ -618,7 +629,10 @@ class SettingsDialog(QDialog):
     def __init__(
         self,
         parent,
-        model: str,
+        provider: str = "codex",
+        api_key: str = "",
+        api_base_url: str = "https://api.openai.com/v1",
+        model: str = "",
         custom_instruction: str = "",
         max_context_messages: int = DEFAULT_CONTEXT_MESSAGES,
     ):
@@ -633,8 +647,24 @@ class SettingsDialog(QDialog):
         title.setObjectName("headline")
         layout.addWidget(title)
 
+        layout.addWidget(QLabel("사용 방식"))
+        self.provider = QComboBox()
+        self.provider.addItem("Codex CLI 로그인", "codex")
+        self.provider.addItem("OpenAI 호환 API 키", "api")
+        self.provider.setCurrentIndex(1 if provider == "api" else 0)
+        layout.addWidget(self.provider)
+
+        self.api_key = QLineEdit()
+        self.api_key.setPlaceholderText("API 키 (이 PC의 설정 파일에 저장됨)")
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setText(api_key)
+        layout.addWidget(self.api_key)
+
+        self.api_base_url = QLineEdit(api_base_url)
+        self.api_base_url.setPlaceholderText("https://api.openai.com/v1")
+        layout.addWidget(self.api_base_url)
+
         self.state = QLabel("로그인 상태 확인 중…")
-        self.state.setTextFormat(Qt.TextFormat.PlainText)
         self.state.setWordWrap(True)
         layout.addWidget(self.state)
 
@@ -906,6 +936,9 @@ class MainWindow(QMainWindow):
         self.store = LocalStore()
         self.chats = self.store.load_chats()
         settings = self.store.settings()
+        self.provider = str(settings.get("provider", "codex"))
+        self.api_key = str(settings.get("api_key", ""))
+        self.api_base_url = str(settings.get("api_base_url", "https://api.openai.com/v1"))
         self.model = str(settings.get("model", ""))
         self.custom_instruction = str(
             settings.get("custom_instruction", "")
@@ -1137,6 +1170,13 @@ class MainWindow(QMainWindow):
         )
 
     def check_login(self):
+        if self.provider == "api":
+            self.logged_in = bool(self.api_key and self.model)
+            self.auth_known = True
+            self.update_key_indicator()
+            self.status.setText("API 설정을 확인해 주세요." if not self.logged_in else "준비 완료")
+            self.set_busy(False)
+            return
         if self.auth_task is not None:
             return
 
@@ -1177,6 +1217,7 @@ class MainWindow(QMainWindow):
         state = (
             "로그인 상태 확인 중"
             if not self.auth_known
+            else            "API 키 사용됨" if self.provider == "api" and self.api_key
             else "🔒 ChatGPT 로그인됨"
             if self.logged_in
             else "🔑 로그인 필요"
@@ -1197,11 +1238,17 @@ class MainWindow(QMainWindow):
 
         dialog = SettingsDialog(
             self,
+            self.provider,
+            self.api_key,
+            self.api_base_url,
             self.model,
             self.custom_instruction,
             self.max_context_messages,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            candidate_provider = dialog.provider.currentData()
+            candidate_api_key = dialog.api_key.text().strip()
+            candidate_api_base_url = dialog.api_base_url.text().strip().rstrip("/")
             candidate_model = dialog.model.currentText().strip()
             candidate_instruction = (
                 dialog.custom_instruction.toPlainText().strip()[
@@ -1211,10 +1258,16 @@ class MainWindow(QMainWindow):
             candidate_context = dialog.context_spin.value()
             try:
                 self.store.save_settings({
+                    "provider": candidate_provider,
+                    "api_key": candidate_api_key,
+                    "api_base_url": candidate_api_base_url,
                     "model": candidate_model,
                     "custom_instruction": candidate_instruction,
                     "max_context_messages": candidate_context,
                 })
+                self.provider = candidate_provider
+                self.api_key = candidate_api_key
+                self.api_base_url = candidate_api_base_url
                 self.model = candidate_model
                 self.custom_instruction = candidate_instruction
                 self.max_context_messages = candidate_context
@@ -1500,6 +1553,9 @@ class MainWindow(QMainWindow):
             self.model,
             self.store,
             chat,
+            provider=self.provider,
+            api_key=self.api_key,
+            api_base_url=self.api_base_url,
             max_context_messages=self.max_context_messages,
             custom_instruction=self.custom_instruction,
             parent=self,

@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {
@@ -425,7 +425,10 @@ class LocalStore:
             context_limit = DEFAULT_CONTEXT_MESSAGES
 
         return {
+            "provider": str(raw.get("provider", "codex")).strip().lower() or "codex",
             "model": str(raw.get("model", "")).strip(),
+            "api_key": str(raw.get("api_key", "")).strip(),
+            "api_base_url": str(raw.get("api_base_url", "https://api.openai.com/v1")).strip().rstrip("/"),
             "custom_instruction": str(
                 raw.get("custom_instruction", "")
             ).strip()[:MAX_CUSTOM_INSTRUCTION_CHARS],
@@ -449,7 +452,10 @@ class LocalStore:
             context_limit = DEFAULT_CONTEXT_MESSAGES
 
         payload = {
+            "provider": str(settings.get("provider", "codex")).strip().lower() or "codex",
             "model": str(settings.get("model", "")).strip(),
+            "api_key": str(settings.get("api_key", "")).strip(),
+            "api_base_url": str(settings.get("api_base_url", "https://api.openai.com/v1")).strip().rstrip("/"),
             "custom_instruction": str(
                 settings.get("custom_instruction", "")
             ).strip()[:MAX_CUSTOM_INSTRUCTION_CHARS],
