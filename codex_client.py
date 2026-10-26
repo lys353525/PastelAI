@@ -460,6 +460,49 @@ def run_api(
     return text
 
 
+def run_anthropic_api(
+    prompt: str,
+    images: list[str],
+    model: str,
+    api_key: str,
+    api_base_url: str = "https://api.anthropic.com",
+    timeout: int = 600,
+) -> str:
+    """Anthropic Messages API를 호출합니다."""
+    if not api_key:
+        raise CodexError("Claude API 키를 입력해 주세요.")
+    if not model:
+        raise CodexError("Claude API 사용 시 모델명을 입력해 주세요.")
+
+    import base64
+    content = [{"type": "text", "text": prompt}]
+    for image_path in images:
+        suffix = Path(image_path).suffix.lower()
+        media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(suffix, "image/png")
+        content.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(Path(image_path).read_bytes()).decode("ascii")}})
+
+    payload = {"model": model, "max_tokens": 8192, "messages": [{"role": "user", "content": content}]}
+    request = urllib.request.Request(
+        api_base_url.rstrip("/") + "/v1/messages",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read(MAX_RESPONSE_BYTES + 1).decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        detail = exc.read(2000).decode("utf-8", errors="replace") if isinstance(exc, urllib.error.HTTPError) else str(exc)
+        raise CodexError(f"Claude API 요청 실패: {detail}") from exc
+    try:
+        text = "".join(str(item.get("text", "")) for item in data["content"] if item.get("type") == "text").strip()
+    except (KeyError, TypeError) as exc:
+        raise CodexError("Claude API 응답 형식이 올바르지 않습니다.") from exc
+    if not text:
+        raise CodexError("Claude API가 빈 답변을 반환했습니다.")
+    return text
+
+
 def run_exec(    prompt: str,
     images: list[str],
     model: str,

@@ -183,7 +183,11 @@ class ApiWorker(QThread):
                 max_messages=self.max_context_messages,
                 custom_instruction=self.custom_instruction,
             )
-            if self.provider == "api":
+            if self.provider == "claude":
+                text = codex_client.run_anthropic_api(
+                    prompt, images, self.model, self.api_key, self.api_base_url
+                )
+            elif self.provider == "api":
                 text = codex_client.run_api(
                     prompt, images, self.model, self.api_key, self.api_base_url
                 )
@@ -714,7 +718,8 @@ class SettingsDialog(QDialog):
         self.provider = QComboBox()
         self.provider.addItem("Codex CLI 로그인", "codex")
         self.provider.addItem("OpenAI 호환 API 키", "api")
-        self.provider.setCurrentIndex(1 if provider == "api" else 0)
+        self.provider.addItem("Claude 공식 API 키", "claude")
+        self.provider.setCurrentIndex({"api": 1, "claude": 2}.get(provider, 0))
         layout.addWidget(self.provider)
 
         self.api_key = QLineEdit()
@@ -724,7 +729,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.api_key)
 
         self.api_base_url = QLineEdit(api_base_url)
-        self.api_base_url.setPlaceholderText("https://api.openai.com/v1")
+        self.api_base_url.setPlaceholderText("OpenAI: https://api.openai.com/v1 · Claude: https://api.anthropic.com")
         layout.addWidget(self.api_base_url)
 
         self.state = QLabel("로그인 상태 확인 중…")
@@ -1240,6 +1245,13 @@ class MainWindow(QMainWindow):
             self.status.setText("API 설정을 확인해 주세요." if not self.logged_in else "준비 완료")
             self.set_busy(False)
             return
+        if self.provider == "claude":
+            self.logged_in = bool(self.api_key and self.model)
+            self.auth_known = True
+            self.update_key_indicator()
+            self.status.setText("Claude API 설정을 확인해 주세요." if not self.logged_in else "준비 완료")
+            self.set_busy(False)
+            return
         if self.auth_task is not None:
             return
 
@@ -1280,7 +1292,7 @@ class MainWindow(QMainWindow):
         state = (
             "로그인 상태 확인 중"
             if not self.auth_known
-            else            "API 키 사용됨" if self.provider == "api" and self.api_key
+            else            "API 키 사용됨" if self.provider in {"api", "claude"} and self.api_key
             else "🔒 ChatGPT 로그인됨"
             if self.logged_in
             else "🔑 로그인 필요"

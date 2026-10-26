@@ -1,4 +1,11 @@
-# ✿ Pastel AI Studio v1.0.3
+# ✿ Pastel AI Studio v1.0.4
+
+## v1.0.4 변경 사항
+
+- Claude 공식 Anthropic Messages API 키 방식 추가
+- 설정에서 Codex CLI, OpenAI 호환 API, Claude 공식 API 선택
+- Claude 기본 주소: `https://api.anthropic.com`
+- Claude 이미지 입력 지원
 
 Codex CLI 또는 별도 API 키를 사용할 수 있는 Windows용 데스크톱 AI 채팅 프로그램입니다.
 
