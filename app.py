@@ -1,4 +1,4 @@
-"""Pastel AI Studio v1.0.8 — PySide6 채팅 클라이언트."""
+"""Pastel AI Studio v1.0.9 — PySide6 채팅 클라이언트."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import re
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 from download_worker import DownloadWorker
@@ -1143,6 +1144,14 @@ class MainWindow(QMainWindow):
         self.setting_button.clicked.connect(self.open_settings)
         left.addWidget(self.setting_button)
 
+        backup_button = QPushButton("💾 데이터 백업")
+        backup_button.clicked.connect(self.backup_data)
+        left.addWidget(backup_button)
+
+        restore_button = QPushButton("♻️ 데이터 복구")
+        restore_button.clicked.connect(self.restore_data)
+        left.addWidget(restore_button)
+
         self.key_indicator = QLabel()
         self.key_indicator.setTextFormat(Qt.TextFormat.PlainText)
         self.key_indicator.setWordWrap(True)
@@ -1374,6 +1383,44 @@ class MainWindow(QMainWindow):
 
         self.update_key_indicator()
         self.check_login()
+
+    def backup_data(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "데이터 백업", "PastelAIStudio-backup.zip", "ZIP 백업 (*.zip)"
+        )
+        if not path:
+            return
+        try:
+            self.store.backup(Path(path))
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "백업 실패", str(exc))
+            return
+        QMessageBox.information(self, "백업 완료", "대화 및 설정을 백업했습니다. API 키는 백업에 포함되지 않습니다.")
+
+    def restore_data(self):
+        if self.generation_active():
+            QMessageBox.warning(self, "복구 불가", "응답 생성 중에는 복구할 수 없습니다.")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "데이터 복구", "", "ZIP 백업 (*.zip)")
+        if not path:
+            return
+        answer = QMessageBox.question(
+            self, "데이터 복구", "현재 대화와 설정을 백업 내용으로 바꿀까요? API 키는 복구되지 않습니다."
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.restore(Path(path))
+            self.chats = self.store.load_chats()
+            self.chat_id = None
+            self.refresh_chats()
+            if self.chats:
+                self.show_chat(next(reversed(self.chats)))
+            else:
+                self.new_chat()
+            self.status.setText("데이터 복구 완료")
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            QMessageBox.warning(self, "복구 실패", str(exc))
 
     def persist(self, show_dialog=True) -> bool:
         try:

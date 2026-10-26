@@ -14,7 +14,7 @@ from pathlib import Path
 
 import credential_store
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {
@@ -456,6 +456,87 @@ class LocalStore:
             self.history_file,
             json.dumps(chats, ensure_ascii=False, indent=2),
         )
+
+    def backup(self, destination: Path) -> Path:
+        """Create a consistent local-data archive; API keys are excluded."""
+        destination = Path(destination).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        files = [self.history_file, self.settings_file]
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        os.close(fd)
+        temporary = Path(temp_name)
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+                for source in files:
+                    if not source.is_file():
+                        continue
+                    data = source.read_bytes()
+                    if source == self.settings_file:
+                        try:
+                            settings = json.loads(data.decode("utf-8"))
+                        except (UnicodeError, ValueError):
+                            settings = {}
+                        if isinstance(settings, dict):
+                            settings.pop("api_key", None)
+                            data = json.dumps(settings, ensure_ascii=False, indent=2).encode("utf-8")
+                    archive.writestr(source.name, data)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
+
+    def restore(self, backup_path: Path) -> None:
+        """Validate a backup completely, then atomically restore data files."""
+        backup_path = Path(backup_path).expanduser().resolve()
+        with zipfile.ZipFile(backup_path, "r") as archive:
+            infos = archive.infolist()
+            names = [item.filename for item in infos]
+            allowed = {"chats.json", "settings.json"}
+            if len(names) != len(set(names)) or not set(names) <= allowed or not names:
+                raise ValueError("백업 파일에 허용되지 않은 항목이 있습니다.")
+            payloads = {}
+            for info in infos:
+                if info.file_size > 64 * 1024 * 1024:
+                    raise ValueError("백업 데이터 파일이 너무 큽니다.")
+                raw = archive.read(info)
+                parsed = json.loads(raw.decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"{info.filename} 형식이 올바르지 않습니다.")
+                payloads[info.filename] = parsed
+        if not payloads:
+            raise ValueError("복구할 데이터가 없습니다.")
+        if "chats.json" in payloads:
+            self.load_chats_from(payloads["chats.json"], self.root)
+        targets = {"chats.json": self.history_file, "settings.json": self.settings_file}
+        for name, parsed in payloads.items():
+            if name == "settings.json":
+                parsed.pop("api_key", None)
+            atomic_text(targets[name], json.dumps(parsed, ensure_ascii=False, indent=2))
+
+    @staticmethod
+    def load_chats_from(parsed: dict, root: Path) -> dict[str, dict]:
+        if not isinstance(parsed, dict):
+            raise ValueError("대화 백업 형식이 올바르지 않습니다.")
+        for cid, chat in parsed.items():
+            checked_id(cid)
+            if not isinstance(chat, dict) or not isinstance(chat.get("messages", []), list):
+                raise ValueError("대화 백업 형식이 올바르지 않습니다.")
+            for message in chat.get("messages", []):
+                if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                    raise ValueError("대화 백업 메시지 형식이 올바르지 않습니다.")
+                for field in ("attachments", "artifacts"):
+                    for item in message.get(field, []):
+                        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                            raise ValueError("첨부 파일 항목 형식이 올바르지 않습니다.")
+                        relative = item["path"]
+                        if not relative.startswith("data/"):
+                            raise ValueError("앱 데이터 폴더 내 첨부 파일만 복구할 수 있습니다.")
+                        candidate = (Path(root) / relative).resolve()
+                        if not candidate.is_relative_to(Path(root).resolve()):
+                            raise ValueError("첨부 파일 경로가 저장 폴더를 벗어납니다.")
+        return parsed
 
     def save_settings(self, settings: dict) -> None:
         try:
