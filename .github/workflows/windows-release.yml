@@ -6,7 +6,7 @@ on:
       release_tag:
         description: '업로드할 GitHub 릴리즈 태그'
         required: true
-        default: 'v1.0.3'
+        default: 'v1.0.8'
   push:
     tags:
       - 'v*'
@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,6 +34,9 @@ jobs:
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
           pip install pyinstaller PySide6 markdown Pygments Pillow pypdf python-docx
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
 
       - name: Build Windows x64 executable
         shell: pwsh

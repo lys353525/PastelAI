@@ -1,4 +1,4 @@
-"""Pastel AI Studio v1.0.1 — PySide6 채팅 클라이언트."""
+"""Pastel AI Studio v1.0.8 — PySide6 채팅 클라이언트."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import time
 import re
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from download_worker import DownloadWorker
 
 import markdown
 from pygments import lex
@@ -380,29 +380,6 @@ class CodePanel(QFrame):
                 atomic_text(Path(path), self.code.rstrip() + "\n")
             except OSError as exc:
                 QMessageBox.warning(self, "저장 오류", str(exc))
-
-
-class DownloadWorker(QThread):
-    success = Signal(str)
-    failure = Signal(str)
-
-    def __init__(self, url: str, destination: str, parent=None):
-        super().__init__(parent)
-        self.url = url
-        self.destination = destination
-
-    def run(self):
-        try:
-            request = Request(self.url, headers={"User-Agent": "PastelAIStudio/1.0"})
-            with urlopen(request, timeout=60) as response, open(self.destination, "wb") as output:
-                while True:
-                    chunk = response.read(1024 * 256)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-            self.success.emit(self.destination)
-        except Exception as exc:
-            self.failure.emit(str(exc))
 
 
 class LinkLabel(QLabel):
