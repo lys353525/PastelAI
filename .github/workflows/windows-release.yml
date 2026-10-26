@@ -33,7 +33,7 @@ jobs:
         run: |
           Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
           pyinstaller --clean --noconfirm app.spec
-          Compress-Archive -Path dist/app/* -DestinationPath PastelAIStudio-windows-x64-v${{ github.ref_name }}.zip
+          Compress-Archive -Path dist/app/* -DestinationPath PastelAIStudio-windows-x64-${{ github.ref_name }}.zip
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
