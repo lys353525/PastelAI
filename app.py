@@ -546,6 +546,13 @@ class MessageBubble(QFrame):
                     continue
 
         for artifact in message.get("artifacts", []):
+            if artifact.get("kind") == "code":
+                try:
+                    path = store.absolute(artifact["path"])
+                    if path.is_file():
+                        layout.addWidget(FileActionWidget(str(artifact.get("name", path.name)), path))
+                except (OSError, ValueError):
+                    continue
             if artifact.get("kind") != "image":
                 continue
             try:

@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {
@@ -534,11 +534,13 @@ class LocalStore:
             code_blocks(text), start=1
         ):
             extension = LANG_EXTENSIONS.get(language, ".txt")
+            filename = f"{mid}_{index:02d}{extension}"
             save(
                 "code",
-                location / "code" / f"{mid}_{index:02d}{extension}",
+                location / "code" / filename,
                 code.rstrip() + "\n",
                 language=language,
+                downloadable=True,
             )
 
         return artifacts
