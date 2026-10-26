@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {

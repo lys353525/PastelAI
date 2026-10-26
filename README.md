@@ -1,4 +1,14 @@
-# Pastel AI Studio v1.0.2
+# ✿ Pastel AI Studio v1.0.3
+
+Codex CLI 또는 별도 API 키를 사용할 수 있는 Windows용 데스크톱 AI 채팅 프로그램입니다.
+
+## v1.0.3 변경 사항
+
+- 답변 속 Markdown 링크를 클릭해 브라우저에서 열기
+- Markdown 이미지 링크를 답변 안에서 표시
+- 사용자 첨부 파일을 채팅창에서 열기 또는 다른 이름으로 저장
+- 답변에 포함된 이미지·파일 결과물 표시 및 저장
+- 코드 블록의 복사 및 코드 파일 저장 기능 강화
 
 Codex CLI 또는 별도의 OpenAI 호환 API 키를 선택해서 사용할 수 있는 Windows용 데스크톱 AI 채팅 프로그램입니다.
 

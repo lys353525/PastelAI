@@ -8,7 +8,10 @@ import shutil
 import sys
 import threading
 import time
+import re
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import markdown
 from pygments import lex
@@ -286,38 +289,33 @@ class ColorHighlighter(QSyntaxHighlighter):
 
 
 def rich_markdown(raw: str) -> str:
-    """원시 HTML을 차단하고 링크·이미지를 일반 텍스트로 변환."""
-    import xml.etree.ElementTree as ET
+    """안전한 Markdown을 HTML로 변환하고 링크·이미지를 클릭 가능하게 둡니다."""
     from markdown.extensions import Extension
     from markdown.treeprocessors import Treeprocessor
 
-    class RemoveLinks(Treeprocessor):
+    class SafeLinks(Treeprocessor):
         def run(self, root):
-            for parent in list(root.iter()):
-                for child in list(parent):
-                    if child.tag == "a":
-                        child.tag = "span"
-                        child.attrib.clear()
-
-                    elif child.tag == "img":
-                        replacement = ET.Element("span")
-                        replacement.text = child.get("alt") or "[이미지]"
-                        replacement.tail = child.tail
-                        index = list(parent).index(child)
-                        parent.remove(child)
-                        parent.insert(index, replacement)
-
+            allowed = {"http", "https", "mailto"}
+            for element in root.iter():
+                if element.tag == "a":
+                    href = element.get("href", "")
+                    if urlparse(href).scheme not in allowed:
+                        element.tag = "span"
+                        element.attrib.clear()
+                elif element.tag == "img":
+                    src = element.get("src", "")
+                    if urlparse(src).scheme not in {"http", "https"}:
+                        element.tag = "span"
+                        element.attrib.clear()
             return root
 
-    class SafeLinks(Extension):
+    class SafeMarkdown(Extension):
         def extendMarkdown(self, md):
-            md.treeprocessors.register(
-                RemoveLinks(md), "remove_external_links", 5
-            )
+            md.treeprocessors.register(SafeLinks(md), "safe_links", 5)
 
     return markdown.markdown(
         html.escape(raw),
-        extensions=["tables", "nl2br", "sane_lists", SafeLinks()],
+        extensions=["tables", "nl2br", "sane_lists", SafeMarkdown()],
     )
 
 
@@ -379,6 +377,63 @@ class CodePanel(QFrame):
                 QMessageBox.warning(self, "저장 오류", str(exc))
 
 
+class DownloadWorker(QThread):
+    success = Signal(str)
+    failure = Signal(str)
+
+    def __init__(self, url: str, destination: str, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.destination = destination
+
+    def run(self):
+        try:
+            request = Request(self.url, headers={"User-Agent": "PastelAIStudio/1.0"})
+            with urlopen(request, timeout=60) as response, open(self.destination, "wb") as output:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+            self.success.emit(self.destination)
+        except Exception as exc:
+            self.failure.emit(str(exc))
+
+
+class LinkLabel(QLabel):
+    def __init__(self, html_text: str, parent=None):
+        super().__init__(parent)
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setText(html_text)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.setOpenExternalLinks(True)
+
+
+class FileActionWidget(QFrame):
+    def __init__(self, name: str, path: Path, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.addWidget(QLabel(f"📎 {name}"), 1)
+        open_button = QPushButton("열기")
+        open_button.setObjectName("subtle")
+        open_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+        row.addWidget(open_button)
+        save_button = QPushButton("다른 이름으로 저장")
+        save_button.setObjectName("subtle")
+        save_button.clicked.connect(self.save_copy)
+        row.addWidget(save_button)
+        self.path = path
+
+    def save_copy(self):
+        destination, _ = QFileDialog.getSaveFileName(self, "파일 저장", self.path.name, "모든 파일 (*.*)")
+        if destination:
+            try:
+                shutil.copy2(self.path, destination)
+            except OSError as exc:
+                QMessageBox.warning(self, "파일 저장 실패", str(exc))
+
+
 class MessageBubble(QFrame):
     regenerate_requested = Signal()
 
@@ -434,17 +489,11 @@ class MessageBubble(QFrame):
             if kind == "code":
                 layout.addWidget(CodePanel(language, body))
             elif body.strip():
-                label = QLabel()
-                label.setTextFormat(Qt.TextFormat.RichText)
-                label.setText(
+                label = LinkLabel(
                     html.escape(body).replace("\n", "<br>")
                     if own else rich_markdown(body)
                 )
-                label.setWordWrap(True)
-                label.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
-                label.setOpenExternalLinks(False)
+                label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
                 layout.addWidget(label)
 
         attachments = message.get("attachments", [])
@@ -458,6 +507,17 @@ class MessageBubble(QFrame):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
             layout.addWidget(label)
+
+            for item in attachments:
+                rel_path = item.get("path")
+                if not isinstance(rel_path, str):
+                    continue
+                try:
+                    file_path = store.absolute(rel_path)
+                    if file_path.is_file():
+                        layout.addWidget(FileActionWidget(str(item.get("name", file_path.name)), file_path))
+                except (OSError, ValueError):
+                    continue
 
             # 첨부된 이미지 미리보기 표시
             for item in attachments:
@@ -495,6 +555,9 @@ class MessageBubble(QFrame):
                         Qt.TransformationMode.SmoothTransformation,
                     ))
                     layout.addWidget(label)
+
+                if artifact.get("path"):
+                    layout.addWidget(FileActionWidget(str(artifact.get("name", Path(artifact["path"]).name)), store.absolute(artifact["path"])))
             except (OSError, ValueError):
                 continue
 
