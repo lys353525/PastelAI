@@ -12,7 +12,9 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.0.6"
+import credential_store
+
+APP_VERSION = "1.0.7"
 APP_DIR = Path.home() / "PastelAIStudio"
 
 SUPPORTED_TEXT = {
@@ -417,6 +419,20 @@ class LocalStore:
 
     def settings(self) -> dict:
         raw = self._load_json(self.settings_file)
+        legacy_api_key = str(raw.get("api_key", "")).strip()
+        provider = str(raw.get("provider", "codex")).strip().lower() or "codex"
+        api_key = ""
+        if provider in {"api", "claude"}:
+            try:
+                api_key = credential_store.get_api_key(provider)
+                if legacy_api_key:
+                    if not api_key:
+                        credential_store.set_api_key(provider, legacy_api_key)
+                        api_key = legacy_api_key
+                    raw.pop("api_key", None)
+                    atomic_text(self.settings_file, json.dumps(raw, ensure_ascii=False, indent=2))
+            except credential_store.CredentialError as exc:
+                raise ValueError(f"Windows 자격 증명 저장소 오류: {exc}") from exc
         try:
             context_limit = int(
                 raw.get("max_context_messages", DEFAULT_CONTEXT_MESSAGES)
@@ -425,9 +441,9 @@ class LocalStore:
             context_limit = DEFAULT_CONTEXT_MESSAGES
 
         return {
-            "provider": str(raw.get("provider", "codex")).strip().lower() or "codex",
+            "provider": provider,
             "model": str(raw.get("model", "")).strip(),
-            "api_key": str(raw.get("api_key", "")).strip(),
+            "api_key": api_key,
             "api_base_url": str(raw.get("api_base_url", "https://api.openai.com/v1")).strip().rstrip("/"),
             "custom_instruction": str(
                 raw.get("custom_instruction", "")
@@ -451,10 +467,13 @@ class LocalStore:
         except (TypeError, ValueError):
             context_limit = DEFAULT_CONTEXT_MESSAGES
 
+        provider = str(settings.get("provider", "codex")).strip().lower() or "codex"
+        api_key = str(settings.get("api_key", "")).strip()
+        if provider in {"api", "claude"}:
+            credential_store.set_api_key(provider, api_key)
         payload = {
-            "provider": str(settings.get("provider", "codex")).strip().lower() or "codex",
+            "provider": provider,
             "model": str(settings.get("model", "")).strip(),
-            "api_key": str(settings.get("api_key", "")).strip(),
             "api_base_url": str(settings.get("api_base_url", "https://api.openai.com/v1")).strip().rstrip("/"),
             "custom_instruction": str(
                 settings.get("custom_instruction", "")
