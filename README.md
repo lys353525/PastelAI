@@ -1,4 +1,11 @@
-# ✿ Pastel AI Studio v1.0.4
+# ✿ Pastel AI Studio v1.0.5
+
+## v1.0.5 변경 사항
+
+- Codex 로그인·OpenAI API·Claude API 설정을 탭으로 분리
+- API 키와 Base URL 입력 방식 개선
+- OpenAI 호환 API 및 Claude API의 모델 목록 자동 조회
+- 모델 목록 새로고침 버튼으로 계정에서 사용 가능한 모델 선택
 
 ## v1.0.4 변경 사항
 

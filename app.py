@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -706,6 +707,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.task = None
         self.login_process = None
+        self.model_refresh_task = None
         self.setWindowTitle(f"설정 · Pastel AI Studio v{APP_VERSION}")
         self.setMinimumWidth(520)
 
@@ -715,12 +717,13 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         layout.addWidget(QLabel("사용 방식"))
-        self.provider = QComboBox()
-        self.provider.addItem("Codex CLI 로그인", "codex")
-        self.provider.addItem("OpenAI 호환 API 키", "api")
-        self.provider.addItem("Claude 공식 API 키", "claude")
-        self.provider.setCurrentIndex({"api": 1, "claude": 2}.get(provider, 0))
-        layout.addWidget(self.provider)
+        self.provider_tabs = QTabWidget()
+        self.provider_tabs.addTab(QLabel("Codex CLI 브라우저 로그인 방식"), "Codex 로그인")
+        self.provider_tabs.addTab(QLabel("OpenAI 호환 API 키 방식"), "OpenAI API")
+        self.provider_tabs.addTab(QLabel("Anthropic Claude 공식 API 방식"), "Claude API")
+        self.provider_tabs.setCurrentIndex({"api": 1, "claude": 2}.get(provider, 0))
+        self.provider_tabs.currentChanged.connect(self.provider_changed)
+        layout.addWidget(self.provider_tabs)
 
         self.api_key = QLineEdit()
         self.api_key.setPlaceholderText("API 키 (이 PC의 설정 파일에 저장됨)")
@@ -760,10 +763,15 @@ class SettingsDialog(QDialog):
         layout.addWidget(QLabel("모델 · 비워 두면 Codex 기본 모델 사용"))
         self.model = QComboBox()
         self.model.setEditable(True)
-        for preset in codex_client.RECOMMENDED_MODELS:
-            self.model.addItem(preset)
+        self.model_refresh = QPushButton("모델 목록 새로고침")
+        self.model_refresh.setObjectName("subtle")
+        self.model_refresh.clicked.connect(self.refresh_models)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model, 1)
+        model_row.addWidget(self.model_refresh)
+        layout.addLayout(model_row)
+        self.model.addItems(codex_client.RECOMMENDED_MODELS)
         self.model.setCurrentText(model)
-        layout.addWidget(self.model)
 
         ctx_row = QHBoxLayout()
         ctx_row.addWidget(QLabel("문맥 유지 메시지 수 (최근 대화 범위):"))
@@ -798,6 +806,37 @@ class SettingsDialog(QDialog):
         self.login_timer.start()
 
         QTimer.singleShot(0, self.refresh)
+
+    def provider_changed(self, index: int):
+        defaults = {0: "", 1: "https://api.openai.com/v1", 2: "https://api.anthropic.com"}
+        if index in defaults and (not self.api_base_url.text().strip() or self.api_base_url.text().strip() in defaults.values()):
+            self.api_base_url.setText(defaults[index])
+        self.refresh_models()
+
+    def refresh_models(self):
+        provider = ["codex", "api", "claude"][self.provider_tabs.currentIndex()]
+        if provider == "codex":
+            return
+        key = self.api_key.text().strip()
+        base = self.api_base_url.text().strip().rstrip("/")
+        if not key or not base:
+            self.state.setText("API 키와 Base URL을 입력한 뒤 모델 목록을 새로고침하세요.")
+            return
+        self.model_refresh.setEnabled(False)
+        self.model_refresh_task = TaskWorker(lambda: codex_client.list_models(provider, key, base), self)
+        self.model_refresh_task.success.connect(self.on_models_loaded)
+        self.model_refresh_task.failure.connect(lambda error: self.state.setText("모델 목록 조회 실패: " + error))
+        self.model_refresh_task.finished.connect(lambda: self.model_refresh.setEnabled(True))
+        self.model_refresh_task.start()
+
+    def on_models_loaded(self, models):
+        current = self.model.currentText().strip()
+        self.model.clear()
+        self.model.addItems(models)
+        if current in models:
+            self.model.setCurrentText(current)
+        self.state.setText(f"모델 {len(models)}개를 불러왔습니다.")
+
 
     def set_task_busy(self, busy: bool):
         for button in (
@@ -1321,7 +1360,7 @@ class MainWindow(QMainWindow):
             self.max_context_messages,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            candidate_provider = dialog.provider.currentData()
+            candidate_provider = ["codex", "api", "claude"][dialog.provider_tabs.currentIndex()]
             candidate_api_key = dialog.api_key.text().strip()
             candidate_api_base_url = dialog.api_base_url.text().strip().rstrip("/")
             candidate_model = dialog.model.currentText().strip()

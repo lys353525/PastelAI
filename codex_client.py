@@ -460,6 +460,30 @@ def run_api(
     return text
 
 
+def list_models(provider: str, api_key: str, api_base_url: str) -> list[str]:
+    """선택한 API 제공자의 모델 ID 목록을 조회합니다."""
+    if provider == "claude":
+        url = api_base_url.rstrip("/") + "/v1/models"
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    elif provider == "api":
+        url = api_base_url.rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+    else:
+        return RECOMMENDED_MODELS[1:]
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        detail = exc.read(1000).decode("utf-8", errors="replace") if isinstance(exc, urllib.error.HTTPError) else str(exc)
+        raise CodexError(f"모델 목록 조회 실패: {detail}") from exc
+    models = data.get("data", [])
+    result = [str(item.get("id")) for item in models if isinstance(item, dict) and item.get("id")]
+    if not result:
+        raise CodexError("API가 모델 목록을 반환하지 않았습니다.")
+    return sorted(set(result))
+
+
 def run_anthropic_api(
     prompt: str,
     images: list[str],
